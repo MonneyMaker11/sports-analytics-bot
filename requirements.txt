@@ -1,0 +1,6 @@
+python-telegram-bot==20.8
+anthropic>=0.40.0
+requests
+beautifulsoup4
+python-dotenv
+aiohttp
