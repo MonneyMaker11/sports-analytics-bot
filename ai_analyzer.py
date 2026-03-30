@@ -583,96 +583,179 @@ class AIAnalyzer:
         return "\n".join([f"  {k}: {v.get('home', '-')} - {v.get('away', '-')}" for k, v in stats.items()])
 
     def _format_odds(self, odds: dict) -> str:
+        """Format betting odds in a readable way."""
         if not odds:
             return "Нет коэффициентов"
+        
         lines = []
-        for bk in (odds.get("bookmakers", []) if isinstance(odds, dict) else odds[:3] if isinstance(odds, list) else []):
+        # Handle both dict and list formats
+        bookmakers_data = []
+        if isinstance(odds, dict):
+            bookmakers_data = odds.get("bookmakers", [])
+        elif isinstance(odds, list):
+            bookmakers_data = odds[:3]
+        
+        for bk in bookmakers_data:
             if isinstance(bk, dict):
                 name = bk.get("name", "Unknown")
-                for mkt in bk.get("markets", [])[:2]:
+                for mkt in bk.get("markets", [])[:3]:
                     if isinstance(mkt, dict):
-                        vals = " | ".join([str(s.get('value', s.get('odd', ''))) for s in (mkt.get("values", mkt.get("selections", []))[:3]) if isinstance(s, dict)])
-                        if vals:
-                            lines.append(f"{name} ({mkt.get('name', '')}): {vals}")
-        return "\n".join(lines) or "Нет данных"
+                        market_name = mkt.get("name", "Unknown")
+                        selections = mkt.get("values", mkt.get("selections", []))
+                        if selections:
+                            odds_str = " | ".join([
+                                f"{s.get('value', s.get('label', 'N/A'))}: {s.get('odd', s.get('value', 'N/A'))}"
+                                for s in selections[:3] if isinstance(s, dict)
+                            ])
+                            if odds_str:
+                                lines.append(f"  {name} ({market_name}): {odds_str}")
+        
+        return "\n".join(lines) if lines else "Нет данных"
+
+    def _format_standings(self, standings: dict) -> str:
+        """Format league standings for both teams."""
+        if not standings:
+            return "Нет данных о турнирной таблице"
+        
+        lines = []
+        for team_id, data in standings.items():
+            pos = data.get('position', '?')
+            pts = data.get('points', 0)
+            played = data.get('played', 0)
+            gf = data.get('goals_for', 0)
+            ga = data.get('goals_against', 0)
+            form = data.get('form', '?????')
+            lines.append(f"  • {pos} место | {pts} очк | {played} игр | Голы: {gf}-{ga} ({gf-ga:+d}) | Форма: {form}")
+        
+        return "\n".join(lines) if lines else "Нет данных"
 
     def _build_prompt(self, match_data: MatchDetails) -> str:
-        """Build analysis prompt with enhanced stats."""
+        """Build focused analysis prompt with key highlights."""
         match = match_data.match
         stats = self.calc.calculate_probabilities(match_data)
 
+        # Format form with detailed breakdown
+        home_form = match_data.home_team_form[:5]
+        away_form = match_data.away_team_form[:5]
+        
+        home_goals_scored = sum(int(m['score'].split(':')[0]) for m in home_form if ':' in m.get('score', ''))
+        home_goals_conceded = sum(int(m['score'].split(':')[1]) for m in home_form if ':' in m.get('score', ''))
+        away_goals_scored = sum(int(m['score'].split(':')[0]) for m in away_form if ':' in m.get('score', ''))
+        away_goals_conceded = sum(int(m['score'].split(':')[1]) for m in away_form if ':' in m.get('score', ''))
+        
+        home_form_str = "".join([m.get('result', '?') for m in home_form])
+        away_form_str = "".join([m.get('result', '?') for m in away_form])
+
+        # Format H2H with trends
+        h2h = match_data.h2h_matches[:5]
+        h2h_btts = sum(1 for m in h2h if (m.get('home_score', 0) or 0) > 0 and (m.get('away_score', 0) or 0) > 0)
+        h2h_over_25 = sum(1 for m in h2h if ((m.get('home_score', 0) or 0) + (m.get('away_score', 0) or 0)) > 2.5)
+        h2h_avg_goals = sum((m.get('home_score', 0) or 0) + (m.get('away_score', 0) or 0) for m in h2h) / len(h2h) if h2h else 0
+
+        # Get odds info
+        odds_info = self._format_odds(match_data.odds)
+        
+        # Get standings info
+        standings_info = self._format_standings(getattr(match_data, 'standings', {}))
+
         data = f"""
-МАТЧ: {match.home_team} vs {match.away_team}
-Турнир: {match.tournament}
-Дата: {match.date}
+⚽ **{match.home_team}** vs **{match.away_team}** | {match.tournament}
+📅 {match.date}
 
---- ФОРМА (последние 5) ---
-{self._format_form(match_data.home_team_form, match.home_team)}
-
-{self._format_form(match_data.away_team_form, match.away_team)}
-
---- H2H ---
-{self._format_h2h(match_data.h2h_matches)}
-
---- СТАТИСТИКА ---
-{self._format_stats(match_data.statistics)}
-
---- КОЭФФИЦИЕНТЫ ---
-{self._format_odds(match_data.odds)}
-"""
-
-        return f"""Ты — профессиональный аналитик футбольных матчей с продвинутыми метриками.
-
-Проанализируй с учётом:
-1. Формы и xG-метрик
-2. Стилей игры команд
-3. Факторов контекста (усталость, мотивация)
-4. H2H трендов
-5. Рыночных сигналов
-
-{data}
-
-📊 ПРОДВИНУТАЯ СТАТИСТИКА (Enhanced Poisson)
 ┌─────────────────────────────────────────┐
-│ ОЖИДАЕМЫЕ ГОЛЫ (xG-based):              │
-│   Хозяева: {stats.get('home_xg', 0):.2f} (стиль: {stats.get('home_style', '?')})│
-│   Гости: {stats.get('away_xg', 0):.2f} (стиль: {stats.get('away_style', '?')})│
-│   Усталость: {stats.get('home_fatigue', 1):.2f} vs {stats.get('away_fatigue', 1):.2f}              │
-│   H2H тренд: {stats.get('h2h_trend', 'none')}                    │
+│ 📈 ФОРМА:                               │
+│ {match.home_team}: {home_form_str} ({home_goals_scored}–{home_goals_conceded}) │
+│ {match.away_team}: {away_form_str} ({away_goals_scored}–{away_goals_conceded}) │
 └─────────────────────────────────────────┘
 
-📈 ВЕРОЯТНОСТИ (с учётом всех факторов)
-• П1: {stats.get('home_win_pct', 0)}% | X: {stats.get('draw_pct', 0)}% | П2: {stats.get('away_win_pct', 0)}%
-• 1X: {stats.get('1X_pct', 0)}% | X2: {stats.get('X2_pct', 0)}%
-• Тотал: {stats.get('expected_total_goals', 0):.2f} гола
-• ТБ 2.5: {stats.get('over_2_5_pct', 0)}% | ТМ 2.5: {stats.get('under_2_5_pct', 0)}%
-• 0-1 гол: {stats.get('goals_0_1_pct', 0)}% | 2-3 гола: {stats.get('goals_2_3_pct', 0)}% | 4+ голов: {stats.get('goals_4+_pct', 0)}%
-• Обе забьют: {stats.get('btts_yes_pct', 0)}% | Нет: {stats.get('btts_no_pct', 0)}%
-• Жёлтые карточки ТБ 4.5: {stats.get('cards_over_4_5_pct', 0)}%
-• Угловые ТБ 9.5: {stats.get('corners_over_9_5_pct', 0)}%
+🎯 **H2H (последние 5):**
+{self._format_h2h(h2h)}
+• Средний тотал: **{h2h_avg_goals:.2f}** | Обе забьют: **{int(h2h_btts/len(h2h)*100) if h2h else 0}%** | ТБ 2.5: **{int(h2h_over_25/len(h2h)*100) if h2h else 0}%**
+• Тренд: **{stats.get('h2h_trend', 'нет')}**
 
-🎯 НАИБОЛЕЕ ВЕРОЯТНЫЕ СЧЕТА
-""" + "\n".join([f"  • {s['score']}: {s['prob']}%" for s in stats.get('likely_scores', [])]) + f"""
+📋 **ТУРНИРНОЕ ПОЛОЖЕНИЕ:**
+{standings_info}
 
-💰 РЫНОЧНЫЕ СИГНАЛЫ
-• Sharp money: {stats.get('sharp_money', 'none')}
-""" + (f"• Value-ставки: " + ", ".join([f"{b['bet']} (edge {b['edge']}%)" for b in stats.get('value_bets', [])]) if stats.get('value_bets') else "• Value-ставок не найдено") + """
+⚙️ **ПРОДВИНУТАЯ СТАТИСТИКА:**
+• xG: **{stats.get('home_xg', 0):.2f}** vs **{stats.get('away_xg', 0):.2f}**
+• Стиль: **{stats.get('home_style', '?')}** vs **{stats.get('away_style', '?')}**
+• Усталость: **{stats.get('home_fatigue', 1):.2f}** vs **{stats.get('away_fatigue', 1):.2f}**
 
-🔍 КЛЮЧЕВЫЕ ФАКТОРЫ МАТЧА
-[Проанализируй:
-- Как стили команд влияют на тотал (атакующий vs оборонительный)?
-- Влияет ли усталость на ожидаемую продуктивность?
-- Что говорит H2H тренд о характере матча?
-- Есть ли расхождения между моделью и рынком?]
+📊 **ВЕРОЯТНОСТИ (Poisson):**
+┌──────────────────────────────────────┐
+│ П1: {stats.get('home_win_pct', 0):5.1f}% | X: {stats.get('draw_pct', 0):5.1f}% | П2: {stats.get('away_win_pct', 0):5.1f}% │
+│ ТБ 2.5: {stats.get('over_2_5_pct', 0):5.1f}% | ТМ 2.5: {stats.get('under_2_5_pct', 0):5.1f}% │
+│ Обе забьют: {stats.get('btts_yes_pct', 0):5.1f}% │
+│ Ожидаемый тотал: **{stats.get('expected_total_goals', 0):.2f}** │
+└──────────────────────────────────────┘
 
-📝 ПРОГНОЗ И РЕКОМЕНДАЦИИ
-[Дай структурированный прогноз с обоснованием:
-- Основная рекомендация (наиболее уверенный исход)
-- Альтернативные варианты (2-3)
-- Риски и что может пойти не так
-- Итоговый прогноз счёта]
+🎲 **СЧЕТА (Top 3):** {', '.join([f"{s['score']} ({s['prob']}%)" for s in stats.get('likely_scores', [])[:3]])}
 
-Будь объективен, объясняй расхождения между статистикой и формой."""
+💰 **РЫНОК:** Sharp: **{stats.get('sharp_money', 'нет')}** | Value: **{', '.join([f"{b['bet']} (+{b['edge']}%)" for b in stats.get('value_bets', [])]) or 'нет'}**
+
+📋 **КОЭФФИЦИЕНТЫ:**
+{odds_info}
+"""
+
+        return f"""Ты — профессиональный спортивный аналитик. Твоя задача — дать **чёткий, структурированный прогноз** на матч.
+
+═══════════════════════════════════════════════════
+📋 **СТРУКТУРА ОТВЕТА** (строго соблюдай)
+═══════════════════════════════════════════════════
+
+**1. ⚽ ЗАГОЛОВОК**
+Формат: ⚽ [Хозяева] vs [Гости] | [Турнир]
+
+**2. 📝 ВСТУПЛЕНИЕ (1 предложение)**
+Только ключевой фактор матча (важность, травмы, мотивация).
+
+**3. 📊 ОСНОВНЫЕ ВЕРОЯТНОСТИ**
+```
+П1: XX% | X: XX% | П2: XX%
+```
+**Метод расчёта (кратко):** 2-3 ключевых фактора (форма, H2H, xG).
+
+**4. 📈 ФОРМА**
+```
+[Хозяева]: П/В/Н... ([забито]–[пропущено])
+[Гости]: П/В/Н... ([забито]–[пропущено])
+```
+
+**5. 🎯 H2H ТРЕНДЫ**
+2-3 пункта с цифрами (средний тотал, % BTTS, доминирование).
+
+**6. 📌 КЛЮЧЕВЫЕ ФАКТОРЫ (2-3 пункта)**
+Только важные: xG, стили, усталость, травмы.
+
+**7. 🎯 РЕКОМЕНДАЦИИ (2 варианта)**
+Формат:
+```
+1. [Ставка] — XX% (коэф. ~X.XX)
+   Обоснование: 1 предложение
+```
+
+**8. ⚡ ВЕРДИКТ (1 предложение)**
+Главный вывод + лучшая ставка.
+
+**9. ⚠️ ДИСКЛЕЙМЕР**
+«Прогноз основан на статистике, но не гарантирует выигрыш.»
+
+═══════════════════════════════════════════════════
+🎨 **ТРЕБОВАНИЯ К СТИЛЮ**
+═══════════════════════════════════════════════════
+• **Выделяй жирным** ключевые цифры и проценты
+• Используй эмодзи для акцентов (⚽📊🎯💡⚡⚠️)
+• **Без воды** — только факты и цифры
+• **Кратко** — максимум 400-500 символов
+• Если данных нет — пиши «нет данных»
+• **Не придумывай** несуществующие данные
+
+═══════════════════════════════════════════════════
+📊 **ДАННЫЕ ДЛЯ АНАЛИЗА**
+═══════════════════════════════════════════════════
+{data}
+
+**НАЧНИ АНАЛИЗ:**"""
 
     async def generate_analysis(self, match_data: MatchDetails) -> str:
         """Generate analysis using Claude."""

@@ -47,6 +47,7 @@ class MatchDetails:
     odds: Dict = field(default_factory=dict)
     lineups: Dict = field(default_factory=dict)
     injuries: Dict = field(default_factory=dict)
+    standings: Dict = field(default_factory=dict)  # League position for both teams
 
 
 class APIFootballParser:
