@@ -68,25 +68,34 @@ class APIFootballParser:
         "bundesliga": 78,          # Bundesliga (Germany)
         "serie_a": 135,            # Serie A (Italy)
         "ligue_1": 61,             # Ligue 1 (France)
-        
+
         # European Competitions
         "champions_league": 2,     # UEFA Champions League
         "europa_league": 3,        # UEFA Europa League
         "conference_league": 848,  # UEFA Conference League
-        
+
         # International Tournaments
         "world_cup": 1,            # FIFA World Cup
         "euro": 4,                 # UEFA European Championship
         "copa_america": 9,         # Copa America
         "nations_league": 5,       # UEFA Nations League
-        
+
+        # World Cup Qualifications (2026)
+        "wc_qual_europe": 32,      # World Cup - Qualification Europe
+        "wc_qual_concacaf": 31,    # World Cup - Qualification CONCACAF
+        "wc_qual_south_america": 34,  # World Cup - Qualification South America
+        "wc_qual_asia": 30,        # World Cup - Qualification Asia
+        "wc_qual_africa": 29,      # World Cup - Qualification Africa
+        "wc_qual_oceania": 33,     # World Cup - Qualification Oceania
+        "wc_qual_playoffs": 37,    # World Cup - Qualification Intercontinental Play-offs
+
         # Other Top Leagues
         "eredivisie": 88,          # Eredivisie (Netherlands)
         "primeira_liga": 94,       # Primeira Liga (Portugal)
         "mls": 253,                # MLS (USA)
         "brasileirao": 71,         # Brasileirão (Brazil)
         "liga_mx": 262,            # Liga MX (Mexico)
-        
+
         # Cups
         "fa_cup": 45,              # FA Cup (England)
         "copa_del_rey": 143,       # Copa del Rey (Spain)
@@ -174,13 +183,25 @@ class APIFootballParser:
             return []
 
         league_id = self.LEAGUE_IDS[league]
+
+        # Special season handling for World Cup Qualifications
+        # Europe qualification uses 2024 season for 2026 World Cup
+        wc_qual_leagues = ["wc_qual_europe", "wc_qual_concacaf", "wc_qual_south_america", 
+                          "wc_qual_asia", "wc_qual_africa", "wc_qual_oceania", "wc_qual_playoffs"]
         
-        # Calculate correct season year
-        today = datetime.now().date()
-        if today.month >= 8:  # Aug-Dec
-            season_year = today.year
-        else:  # Jan-Jul
-            season_year = today.year - 1
+        if league in wc_qual_leagues:
+            # Most WC qualifications use 2024/2025 season for 2026 World Cup
+            if league == "wc_qual_europe":
+                season_year = 2024  # Europe uses 2024 season
+            else:
+                season_year = 2026  # Others use 2026 season
+        else:
+            # Standard season calculation for regular leagues
+            today = datetime.now().date()
+            if today.month >= 8:  # Aug-Dec
+                season_year = today.year
+            else:  # Jan-Jul
+                season_year = today.year - 1
 
         cache_key = f"{league}_{season_year}"
         current_time = time.time()
@@ -377,15 +398,21 @@ class APIFootballParser:
 
     def _get_h2h(self, home_team_id: str, away_team_id: str, last: int = 5) -> List[Dict]:
         """Get head-to-head history."""
-        params = {
-            "h2h": f"{home_team_id}-{away_team_id}",
-            "last": last
-        }
-        data = self._make_request("/fixtures/headtohead", params)
-        
+        # Try multiple approaches for national teams vs club teams
+        params_options = [
+            {"h2h": f"{home_team_id}-{away_team_id}", "last": last},  # Club teams
+            {"h2h": f"{home_team_id}-{away_team_id}", "last": last, "season": 2024},  # National teams
+            {"h2h": f"{home_team_id}-{away_team_id}", "last": last, "season": 2025},  # National teams current
+        ]
+
+        for params in params_options:
+            data = self._make_request("/fixtures/headtohead", params)
+            if data and data.get("response"):
+                break
+
         if not data or not data.get("response"):
             return []
-        
+
         h2h = []
         for fixture in data["response"][:last]:
             teams = fixture.get("teams", {})
@@ -397,7 +424,7 @@ class APIFootballParser:
                 "away_score": goals.get("away"),
                 "date": fixture.get("fixture", {}).get("timestamp", 0)
             })
-        
+
         return h2h
 
     def _get_team_form(self, team_id: str, last: int = 5) -> List[Dict]:
@@ -405,13 +432,28 @@ class APIFootballParser:
         if not team_id:
             logger.warning("Empty team_id for form request")
             return []
-        
-        params = {
-            "team": team_id,
-            "last": last
-        }
-        logger.info(f"Fetching form for team {team_id}...")
-        data = self._make_request("/fixtures/team", params)
+
+        # For national teams, use /fixtures with team+league+season
+        # For club teams, use /fixtures/team
+        data = None
+
+        # Try national team approach first (WC Qualification, Nations League)
+        for league_id in [32, 5, 4, 1]:  # WC Qual, Nations League, Euro, World Cup
+            for season in [2024, 2025, 2026]:
+                params = {"team": team_id, "league": league_id, "season": season}
+                logger.info(f"Fetching form for team {team_id}: league={league_id}, season={season}")
+                result = self._make_request("/fixtures", params)
+                if result and result.get("response"):
+                    data = result
+                    break
+            if data:
+                break
+
+        # Fallback to club team approach
+        if not data:
+            logger.info(f"Trying club team approach for {team_id}")
+            params = {"team": team_id, "last": last}
+            data = self._make_request("/fixtures/team", params)
 
         if not data or not data.get("response"):
             logger.warning(f"No form data for team {team_id}")

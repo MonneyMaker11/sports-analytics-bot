@@ -475,7 +475,18 @@ class EnhancedPoissonCalculator:
         if not tournament:
             return "default"
         name = tournament.lower()
-        mapping = {"premier": "premier_league", "la liga": "la_liga", "bundesliga": "bundesliga", "serie a": "serie_a", "ligue 1": "ligue_1", "champions": "champions_league", "europa": "europa_league"}
+        mapping = {
+            "premier": "premier_league",
+            "la liga": "la_liga",
+            "bundesliga": "bundesliga",
+            "serie a": "serie_a",
+            "ligue 1": "ligue_1",
+            "champions": "champions_league",
+            "europa": "europa_league",
+            "world cup qualification": "wc_qual_europe",
+            "wc qualification": "wc_qual_europe",
+            "qualification europe": "wc_qual_europe",
+        }
         for k, v in mapping.items():
             if k in name:
                 return v

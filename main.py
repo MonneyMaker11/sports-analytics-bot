@@ -166,6 +166,9 @@ class FootballBot:
             "premier_league", "la_liga", "bundesliga", "serie_a", "ligue_1",
             "champions_league", "europa_league",
             "eredivisie", "primeira_liga", "mls", "brasileirao",
+            # World Cup Qualifications
+            "wc_qual_europe", "wc_qual_concacaf", "wc_qual_south_america",
+            "wc_qual_asia", "wc_qual_africa", "wc_qual_oceania", "wc_qual_playoffs",
         ]
         
         for league in leagues_to_check:
@@ -238,24 +241,33 @@ class FootballBot:
             "bundesliga": "🇩🇪 Bundesliga",
             "serie_a": "🇮🇹 Serie A",
             "ligue_1": "🇫🇷 Ligue 1",
-            
+
             # European Competitions
             "champions_league": "🏆 Champions League",
             "europa_league": "🏆 Europa League",
             "conference_league": "🏆 Conference League",
-            
+
             # International Tournaments
             "world_cup": "🌍 World Cup",
             "euro": "🇪🇺 Euro Championship",
             "nations_league": "🏆 Nations League",
-            
+
+            # World Cup Qualifications 2026
+            "wc_qual_europe": "🌍 Квалификация ЧМ (Европа)",
+            "wc_qual_concacaf": "🌍 Квалификация ЧМ (CONCACAF)",
+            "wc_qual_south_america": "🌍 Квалификация ЧМ (Юж. Америка)",
+            "wc_qual_asia": "🌍 Квалификация ЧМ (Азия)",
+            "wc_qual_africa": "🌍 Квалификация ЧМ (Африка)",
+            "wc_qual_oceania": "🌍 Квалификация ЧМ (Океания)",
+            "wc_qual_playoffs": "🌍 Квалификация ЧМ (Плей-офф)",
+
             # Other Top Leagues
             "eredivisie": "🇳🇱 Eredivisie",
             "primeira_liga": "🇵🇹 Primeira Liga",
             "mls": "🇺🇸 MLS",
             "brasileirao": "🇧🇷 Brasileirão",
             "liga_mx": "🇲🇽 Liga MX",
-            
+
             # Domestic Cups
             "fa_cup": "🏆 FA Cup",
             "copa_del_rey": "🏆 Copa del Rey",
