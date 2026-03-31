@@ -1,0 +1,42 @@
+{
+  "1537582": {
+    "match_id": "1537582",
+    "user_id": 379167016,
+    "home_team": "Congo DR",
+    "away_team": "Jamaica",
+    "tournament": "World Cup - Qualification Intercontinental Play-offs",
+    "match_date": "1774990800",
+    "predictions": {
+      "home_win_pct": 36,
+      "draw_pct": 31,
+      "away_win_pct": 32,
+      "over_2_5_pct": 31,
+      "under_2_5_pct": 69,
+      "btts_yes_pct": 39,
+      "btts_no_pct": 61,
+      "likely_scores": [
+        {
+          "score": "0:0",
+          "prob": 14
+        },
+        {
+          "score": "1:0",
+          "prob": 14
+        },
+        {
+          "score": "1:1",
+          "prob": 14
+        },
+        {
+          "score": "0:1",
+          "prob": 13
+        },
+        {
+          "score": "2:0",
+          "prob": 7
+        }
+      ]
+    },
+    "report_sent": false
+  }
+}

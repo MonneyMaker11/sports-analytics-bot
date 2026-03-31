@@ -9,7 +9,7 @@ import datetime
 import logging
 import os
 import re
-from typing import Optional
+from typing import Optional, Dict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -23,7 +23,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 
 from api_football_parser import APIFootballParser, Match, MatchDetails
-from ai_analyzer import AIAnalyzer, PoissonCalculator
+from ai_analyzer import AIAnalyzer
 from match_results_tracker import MatchResultsTracker, PostMatchReporter
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ SELECT_SPORT, SELECT_DATE, SELECT_LEAGUE, SELECT_MATCH = range(4)
 # Persistent keyboard for easy access
 MAIN_KEYBOARD = ReplyKeyboardMarkup([
     [KeyboardButton("📅 Анализ матча")],
+    [KeyboardButton("✅ Проверить результаты")],
     [KeyboardButton("ℹ️ Помощь")]
 ], resize_keyboard=True)
 
@@ -61,6 +62,10 @@ class FootballBot:
 
         self.parser = APIFootballParser(api_key=api_football_key or "")
         self.analyzer = AIAnalyzer() if anthropic_key else None
+        
+        if not self.analyzer:
+            logger.warning("ANTHROPIC_API_KEY not set - AI analysis will not work!")
+        
         self.default_league = default_league
 
         self.application = Application.builder().token(token).build()
@@ -75,7 +80,8 @@ class FootballBot:
         """Set up command and callback handlers."""
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("help", self.cmd_help))
-        
+        self.application.add_handler(CommandHandler("checkresults", self.cmd_check_results))
+
         # Handle keyboard button text as messages
         self.application.add_handler(MessageHandler(
             filters.Regex("^📅 Анализ матча$"),
@@ -85,12 +91,19 @@ class FootballBot:
             filters.Regex("^ℹ️ Помощь$"),
             self.cmd_help
         ))
-        
+        self.application.add_handler(MessageHandler(
+            filters.Regex("^✅ Проверить результаты$"),
+            self.cmd_check_results
+        ))
+
         # Conversation handlers
         self.application.add_handler(CallbackQueryHandler(self.on_sport_select, pattern=r"^sport_"))
         self.application.add_handler(CallbackQueryHandler(self.on_date_select, pattern=r"^date_"))
         self.application.add_handler(CallbackQueryHandler(self.on_league_select, pattern=r"^league_"))
         self.application.add_handler(CallbackQueryHandler(self.on_match_select, pattern=r"^match_"))
+        self.application.add_handler(CallbackQueryHandler(self.cmd_check_results_inline, pattern=r"^check_results$"))
+        self.application.add_handler(CallbackQueryHandler(self.cmd_check_match_report, pattern=r"^check_match_"))
+        self.application.add_handler(CallbackQueryHandler(self.cmd_ignore_callback, pattern=r"^separator"))
 
     async def cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -102,7 +115,7 @@ class FootballBot:
             "📌 Нажмите кнопку внизу или используйте команды:\n"
             "/start — начать анализ\n"
             "/help — помощь\n\n"
-            "🔹 Бот использует API-Football для данных и Poisson-модель для расчётов.",
+            "🔹 Бот использует API-Football для данных и Claude AI для анализа.",
             reply_markup=MAIN_KEYBOARD
         )
         logger.info(f"User {update.effective_user.id} started the bot")
@@ -386,23 +399,246 @@ class FootballBot:
             "2. Выберите дату (показывается количество матчей)\n"
             "3. Выберите лигу (показывается количество матчей)\n"
             "4. Выберите матч\n"
-            "5. Получите статистический прогноз\n\n"
+            "5. Получите AI прогноз\n\n"
+            "✅ **Проверить результаты** — проверить завершенные матчи и получить отчеты\n"
+            "Бот отправит отчет, если вы запрашивали анализ и матч уже завершился\n\n"
             "🔹 **Источники данных:**\n"
-            "• API-Football — расписание, форма команд, статистика\n"
-            "• Poisson-модель — математический расчёт вероятностей\n"
-            "• GPT-4o-mini (опционально) — анализ и рекомендации\n\n"
-            "🎯 **Точность:** ~60-65%\n\n"
-            "⚠️ Для полного анализа с рекомендациями нужен OpenAI API ключ"
+            "• API-Football — расписание, форма команд, статистика, коэффициенты\n"
+            "• Claude AI — анализ данных, поиск актуальных травм и новостей\n"
+            "• Интернет — проверка травм, составов, мотивации (авторитетные источники)\n\n"
+            "🎯 **Точность:** ~65-70%\n\n"
+            "⚠️ Для полного анализа с рекомендациями нужен Anthropic API ключ"
         )
+
+    async def cmd_check_results(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle Check Results button - show list of tracked matches."""
+        logger.info(f"User {update.effective_user.id} requested results check")
+        
+        # Get the message object
+        if update.message:
+            target = update.message
+        elif update.callback_query:
+            target = update.callback_query.message
+        else:
+            return
+        
+        try:
+            # Get all tracked matches
+            tracked_match_ids = list(self.tracker.tracked_matches.keys())
+            
+            if not tracked_match_ids:
+                await target.reply_text(
+                    "📊 **Нет отслеживаемых матчей**\n\n"
+                    "Вы ещё не запрашивали анализ матчей.\n\n"
+                    "Как только вы запросите AI анализ любого матча, "
+                    "бот будет отслеживать его результат и отправит отчет после завершения."
+                )
+                return
+            
+            # Build list of matches with status
+            matches_info = []
+            
+            for match_id in tracked_match_ids:
+                tracked = self.tracker.get_tracked_match(match_id)
+                if not tracked:
+                    continue
+                
+                # Get current match status from API
+                params = {"id": match_id}
+                data = self.parser._make_request("/fixtures", params)
+                
+                status = "❓"
+                score = "-:-"
+                finished = False
+                
+                if data and data.get("response"):
+                    fixture = data["response"][0]
+                    status = fixture.get("fixture", {}).get("status", {}).get("short", "?")
+                    goals = fixture.get("goals", {})
+                    home_score = goals.get("home", "-")
+                    away_score = goals.get("away", "-")
+                    score = f"{home_score}:{away_score}"
+                    finished = status in ['FT', 'AET', 'PEN', 'ET']
+                
+                matches_info.append({
+                    'match_id': match_id,
+                    'home_team': tracked.home_team,
+                    'away_team': tracked.away_team,
+                    'tournament': tracked.tournament,
+                    'status': status,
+                    'score': score,
+                    'finished': finished,
+                    'report_sent': tracked.report_sent
+                })
+            
+            # Create keyboard with matches
+            keyboard = []
+            
+            # Add finished matches first
+            finished_matches = [m for m in matches_info if m['finished']]
+            pending_matches = [m for m in matches_info if not m['finished']]
+            
+            for match in finished_matches:
+                emoji = "✅" if match['report_sent'] else "🆕"
+                btn_text = f"{emoji} {match['home_team']} vs {match['away_team']} ({match['score']})"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"check_match_{match['match_id']}")])
+            
+            if finished_matches and pending_matches:
+                keyboard.append([InlineKeyboardButton("─" * 15, callback_data="separator")])
+            
+            for match in pending_matches:
+                status_emoji = "⏳" if match['status'] == 'NS' else "🔴" if match['status'] in ['1H', '2H', 'HT'] else "❓"
+                btn_text = f"{status_emoji} {match['home_team']} vs {match['away_team']} ({match['status']})"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"check_match_{match['match_id']}")])
+            
+            # Add navigation buttons
+            keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="check_results")])
+            keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="date_0")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Count stats
+            finished_count = len(finished_matches)
+            pending_count = len(pending_matches)
+            sent_count = sum(1 for m in matches_info if m['report_sent'])
+            
+            summary = f"📊 **ОТСЛЕЖИВАЕМЫЕ МАТЧИ**\n\n"
+            summary += f"📁 Всего: {len(matches_info)}\n"
+            summary += f"✅ Завершено: {finished_count}\n"
+            summary += f"⏳ В ожидании: {pending_count}\n"
+            summary += f"📨 Отчетов отправлено: {sent_count}\n\n"
+            summary += "Выберите матч для просмотра отчета:"
+            
+            await target.reply_text(summary, reply_markup=reply_markup)
+            
+        except Exception as e:
+            logger.error(f"Error showing tracked matches: {e}", exc_info=True)
+            await target.reply_text(
+                "❌ Произошла ошибка при проверке результатов.\n"
+                "Попробуйте позже."
+            )
+
+    async def cmd_check_results_inline(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle inline Check Results button."""
+        query = update.callback_query
+        await query.answer("🔍 Загружаю матчи...")
+        
+        # Call the main check results method
+        await self.cmd_check_results(update, context)
+
+    async def cmd_ignore_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Ignore separator/callbacks without action."""
+        query = update.callback_query
+        await query.answer()
+
+    async def cmd_check_match_report(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle individual match selection from tracked matches list."""
+        query = update.callback_query
+        match_id = query.data.replace("check_match_", "")
+        
+        await query.answer("🔍 Проверяю матч...")
+        
+        try:
+            # Get tracked match
+            tracked = self.tracker.get_tracked_match(match_id)
+            
+            if not tracked:
+                await query.message.reply_text(
+                    "❌ Матч не найден в отслеживаемых."
+                )
+                return
+            
+            # Get current match status from API
+            params = {"id": match_id}
+            data = self.parser._make_request("/fixtures", params)
+            
+            if not data or not data.get("response"):
+                await query.message.reply_text(
+                    "❌ Не удалось получить данные о матче."
+                )
+                return
+            
+            fixture = data["response"][0]
+            status = fixture.get("fixture", {}).get("status", {}).get("short", "")
+            goals = fixture.get("goals", {})
+            home_score = goals.get("home", "-")
+            away_score = goals.get("away", "-")
+            
+            # Check if match is finished
+            if status not in ['FT', 'AET', 'PEN', 'ET']:
+                # Match not finished yet
+                status_text = {
+                    'NS': 'Не начался',
+                    '1H': 'Первый тайм',
+                    '2H': 'Второй тайм',
+                    'HT': 'Перерыв',
+                    'LIVE': 'Идет матч'
+                }.get(status, status)
+                
+                await query.message.reply_text(
+                    f"⏳ **МАТЧ ЕЩЁ НЕ ЗАВЕРШЕН**\n\n"
+                    f"{tracked.home_team} vs {tracked.away_team}\n"
+                    f"🏆 {tracked.tournament}\n\n"
+                    f"Статус: {status_text}\n"
+                    f"Счет: {home_score}:{away_score}\n\n"
+                    f"Отчет будет отправлен после завершения матча."
+                )
+                return
+            
+            # Match is finished - check if report already sent
+            if tracked.report_sent:
+                await query.message.reply_text(
+                    f"✅ **ОТЧЕТ УЖЕ ОТПРАВЛЕН**\n\n"
+                    f"{tracked.home_team} {home_score}:{away_score} {tracked.away_team}\n\n"
+                    f"Отчет был отправлен ранее."
+                )
+                return
+            
+            # Generate and send report
+            actual_result = {
+                'home_score': home_score,
+                'away_score': away_score
+            }
+            
+            report = self.reporter.generate_report(match_id, actual_result)
+            
+            if not report:
+                await query.message.reply_text(
+                    "❌ Не удалось сгенерировать отчет."
+                )
+                return
+            
+            # Send report
+            await query.message.reply_text(report, parse_mode='Markdown')
+            
+            # Mark as sent
+            self.tracker.mark_report_sent(match_id)
+            
+            logger.info(f"Sent post-match report to user {tracked.user_id} for match {match_id}")
+            
+        except Exception as e:
+            logger.error(f"Error checking match report: {e}", exc_info=True)
+            await query.message.reply_text(
+                "❌ Произошла ошибка при проверке матча.\n"
+                "Попробуйте позже."
+            )
 
     async def _analyze_match(
         self, query, match_id: str
     ) -> None:
-        """Analyze selected match using API-Football data + Poisson + optional GPT."""
+        """Analyze selected match using ONLY Claude AI."""
         logger.info(f"User {query.from_user.id} selected match {match_id}")
 
         analyzing_message = await query.message.reply_text(
-            "🔍 Анализирую матч (статистика + Poisson), подождите..."
+            "🔍 Анализирую матч (AI Claude), подождите..."
         )
 
         try:
@@ -416,51 +652,52 @@ class FootballBot:
                 )
                 return
 
-            # Generate Poisson-based analysis
-            calc = PoissonCalculator()
-            stats = calc.calculate_probabilities(match_details)
-
             match = match_details.match
             header = f"⚽ {match.home_team} vs {match.away_team}\n"
             header += f"🏆 {match.tournament}\n\n"
 
-            # Track match for post-match report
+            # Check if Anthropic is available
+            if not self.analyzer:
+                await analyzing_message.edit_text(
+                    header +
+                    "❌ **AI анализ недоступен**\n\n"
+                    "Требуется ANTHROPIC_API_KEY для анализа.\n"
+                    "Пожалуйста, настройте API ключ в .env файле."
+                )
+                return
+
+            # === ONLY CLAUDE AI ANALYSIS ===
+            # Claude получает ВСЕ данные из API и сам делает анализ
+            # Никаких предварительных расчетов вероятностей
+            analysis = await self.analyzer.generate_analysis(match_details)
+
+            # === TRACK MATCH FOR POST-MATCH REPORT ===
+            # Extract predictions from AI analysis for post-match tracking
+            predictions = self._extract_predictions_from_analysis(analysis)
+
+            # Convert match timestamp to ISO date for tracking
+            match_date_str = str(match.date) if match.date else ""
+
+            # Track the match for post-match report
             self.tracker.track_match(
                 match_id=match_id,
                 user_id=query.from_user.id,
                 home_team=match.home_team,
                 away_team=match.away_team,
                 tournament=match.tournament,
-                match_date=match.date if isinstance(match.date, str) else str(match.date),
-                predictions={
-                    'home_win_pct': stats['home_win_pct'],
-                    'draw_pct': stats['draw_pct'],
-                    'away_win_pct': stats['away_win_pct'],
-                    'over_2_5_pct': stats['over_2_5_pct'],
-                    'under_2_5_pct': stats['under_2_5_pct'],
-                    'btts_yes_pct': stats['btts_yes_pct'],
-                    'btts_no_pct': stats['btts_no_pct'],
-                    'likely_scores': stats.get('likely_scores', [])
-                }
+                match_date=match_date_str,
+                predictions=predictions
             )
-            logger.info(f"Tracked match {match_id} for post-match report")
+            logger.info(f"Match {match_id} tracked for post-match report for user {query.from_user.id}")
 
-            # Check if Anthropic is available
-            anthropic_available = (
-                os.getenv("ANTHROPIC_API_KEY") and
-                os.getenv("ANTHROPIC_API_KEY") != "your_anthropic_api_key_here"
-            ) and self.analyzer is not None
+            # Add inline keyboard with "Check Results" button
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Проверить результаты", callback_data="check_results")],
+                [InlineKeyboardButton("📅 Другой матч", callback_data="date_0")]
+            ])
 
-            if not anthropic_available:
-                # Free analysis with full team form from API-Football
-                stats_text = self._format_stats_analysis(stats, match_details)
-                await analyzing_message.edit_text(header + stats_text)
-                return
-
-            # GPT analysis with full API-Football data
-            analysis = await self.analyzer.generate_analysis(match_details)
-            await analyzing_message.edit_text(header + analysis)
-            logger.info(f"Analysis sent for match {match_id}")
+            await analyzing_message.edit_text(header + analysis, reply_markup=keyboard)
+            logger.info(f"AI analysis sent for match {match_id}")
 
         except Exception as e:
             logger.error(f"Error analyzing match {match_id}: {e}", exc_info=True)
@@ -469,24 +706,107 @@ class FootballBot:
                 "Попробуйте позже или выберите другой матч."
             )
 
+    def _extract_predictions_from_analysis(self, analysis: str) -> Dict:
+        """
+        Extract prediction probabilities from AI analysis text.
+        Parses the analysis to get 1X2, over/under, BTTS probabilities.
+        """
+        predictions = {}
+        
+        # Extract 1X2 probabilities (e.g., "П1: 45% | X: 28% | П2: 27%")
+        x2_match = re.search(r"П1:\s*(\d+)%\s*\|\s*X:\s*(\d+)%\s*\|\s*П2:\s*(\d+)%", analysis)
+        if x2_match:
+            predictions['home_win_pct'] = int(x2_match.group(1))
+            predictions['draw_pct'] = int(x2_match.group(2))
+            predictions['away_win_pct'] = int(x2_match.group(3))
+        
+        # Extract over/under 2.5 (e.g., "ТБ 2.5: 55%" or "Тотал > 2.5: 55%" or "ТБ 2.5 — 55%")
+        over_match = re.search(r"(?:ТБ|Тотал\s*>\s*)\s*2\.5[:\s—-]\s*(\d+)%", analysis)
+        under_match = re.search(r"(?:ТМ|Тотал\s*<\s*)\s*2\.5[:\s—-]\s*(\d+)%", analysis)
+        if over_match:
+            predictions['over_2_5_pct'] = int(over_match.group(1))
+        if under_match:
+            predictions['under_2_5_pct'] = int(under_match.group(1))
+        
+        # Extract BTTS (e.g., "Обе забьют: 60%" or "Обе забьют — 60%" or "ОЗ: 60%")
+        # Also try to find from recommendations section
+        btts_match = re.search(r"(?:Обе\s*забьют|ОЗ)[:\s—-]\s*(\d+)%", analysis)
+        if btts_match:
+            predictions['btts_yes_pct'] = int(btts_match.group(1))
+            predictions['btts_no_pct'] = 100 - predictions['btts_yes_pct']
+        
+        # Extract likely scores (e.g., "• 1:1: 12%" or "1:1 — 12%")
+        score_matches = re.findall(r"•\s*(\d+:\d+):\s*(\d+)%", analysis)
+        if score_matches:
+            predictions['likely_scores'] = [
+                {"score": score, "prob": int(prob)} 
+                for score, prob in score_matches[:5]
+            ]
+        
+        # Fallback: Try to extract from stats section if available
+        if 'btts_yes_pct' not in predictions:
+            # Look for "ТБ 2.5 — XX%" pattern in recommendations
+            tb_rec = re.search(r"ТБ\s*2\.5\s*—\s*(\d+)%", analysis)
+            if tb_rec:
+                predictions['over_2_5_pct'] = int(tb_rec.group(1))
+                predictions['under_2_5_pct'] = 100 - predictions['over_2_5_pct']
+        
+        # Fallback defaults if parsing failed
+        if not predictions:
+            predictions = {
+                'home_win_pct': 33,
+                'draw_pct': 34,
+                'away_win_pct': 33,
+                'over_2_5_pct': 50,
+                'under_2_5_pct': 50,
+                'btts_yes_pct': 50,
+                'btts_no_pct': 50,
+                'likely_scores': []
+            }
+        
+        logger.info(f"Extracted predictions from analysis: {predictions}")
+        return predictions
+
     def _format_stats_analysis(self, stats: dict, match_details: MatchDetails) -> str:
         """Format Poisson statistics analysis."""
         match = match_details.match
-        
+
         # Get team form summary
         home_form = match_details.home_team_form
         away_form = match_details.away_team_form
-        
+
         home_form_str = "".join([m.get("result", "?") for m in home_form[:5]])
         away_form_str = "".join([m.get("result", "?") for m in away_form[:5]])
+
+        # Check if market odds were blended
+        blended = stats.get("blended", False)
+        is_national = stats.get("is_national_teams", False)
         
-        stats_text = (
-            f"📈 **СТАТИСТИЧЕСКИЙ ПРОГНОЗ (Poisson-модель)**\n\n"
+        # Build header
+        stats_text = f"📈 **СТАТИСТИЧЕСКИЙ ПРОГНОЗ{' + Рынок' if blended else ''} ({'Сборные' if is_national else 'Poisson-модель'})**\n\n"
+        
+        # Show market odds if available
+        if stats.get("market_home_odd"):
+            stats_text += (
+                f"💰 **Коэффициенты букмекеров:**\n"
+                f"П1: {stats['market_home_odd']:.2f} | X: {stats['market_draw_odd']:.2f} | П2: {stats['market_away_odd']:.2f}\n\n"
+            )
+        
+        stats_text += (
             f"📊 **Форма команд (последние 5 матчей):**\n"
             f"🏠 {match.home_team}: {home_form_str}\n"
             f"✈️ {match.away_team}: {away_form_str}\n\n"
             f"🎯 **ОСНОВНЫЕ ВЕРОЯТНОСТИ**\n"
             f"П1: {stats['home_win_pct']}% | X: {stats['draw_pct']}% | П2: {stats['away_win_pct']}%\n\n"
+        )
+        
+        # Add note about blending for national teams
+        if blended and is_national:
+            stats_text += (
+                f"ℹ️ _Вероятности скорректированы по рыночным коэффициентам (40% модель + 60% рынок)_\n\n"
+            )
+        
+        stats_text += (
             f"⚽ **ГОЛЫ**\n"
             f"Ожидаемый тотал: {stats['expected_total_goals']}\n"
             f"Тотал > 2.5: {stats['over_2_5_pct']}%\n"
@@ -498,9 +818,9 @@ class FootballBot:
             f"Угловые > 9.5: {stats['corners_over_9_5_pct']}%\n\n"
             f"🎲 **НАИБОЛЕЕ ВЕРОЯТНЫЕ СЧЕТА**\n"
             + "\n".join([f"• {s['score']}: {s['prob']}%" for s in stats['likely_scores']]) + "\n\n"
-            f"ℹ️ _Данные предоставлены API-Football. Для анализа с рекомендациями добавьте OpenAI API ключ._"
+            f"ℹ️ _Данные предоставлены API-Football. Для анализа с рекомендациями добавьте Anthropic API ключ._"
         )
-        
+
         return stats_text
 
     async def run(self) -> None:
@@ -509,10 +829,11 @@ class FootballBot:
         await self.application.initialize()
         await self.application.start()
         await self.application.updater.start_polling()
-        logger.info("Bot is running")
+        logger.info("Bot is running (manual results check enabled)")
 
-        # Schedule periodic match results check (every 30 minutes)
-        asyncio.create_task(self._periodic_results_check())
+        # Note: Automatic periodic check disabled to save API requests
+        # Users can manually check results with the "✅ Проверить результаты" button
+        # asyncio.create_task(self._periodic_results_check())
 
         try:
             while True:
@@ -522,54 +843,6 @@ class FootballBot:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
-
-    async def _periodic_results_check(self) -> None:
-        """Periodically check for finished matches and send reports."""
-        logger.info("Started periodic results check task")
-        
-        while True:
-            try:
-                await asyncio.sleep(300)  # Check every 5 minutes (was 30)
-                
-                logger.info("Checking for finished matches...")
-                
-                # Get tracked match IDs
-                tracked_match_ids = list(self.tracker.tracked_matches.keys())
-                if not tracked_match_ids:
-                    continue
-                
-                # Check each tracked match
-                finished_matches = []
-                for match_id in tracked_match_ids:
-                    tracked = self.tracker.get_tracked_match(match_id)
-                    if not tracked or tracked.report_sent:
-                        continue
-                    
-                    # Get current match status from API
-                    params = {"id": match_id}
-                    data = self.parser._make_request("/fixtures", params)
-                    
-                    if data and data.get("response"):
-                        fixture = data["response"][0]
-                        status = fixture.get("fixture", {}).get("status", {}).get("short", "")
-                        
-                        # If match is finished
-                        if status in ['FT', 'AET', 'PEN']:
-                            finished_matches.append(fixture)
-                
-                # Send reports for finished matches
-                if finished_matches:
-                    reports_sent = await self.reporter.check_and_send_reports(
-                        self.application,
-                        finished_matches
-                    )
-                    logger.info(f"Sent {reports_sent} post-match reports")
-                
-                # Cleanup old matches
-                self.tracker.cleanup_old_matches(days=7)
-                
-            except Exception as e:
-                logger.error(f"Error in periodic results check: {e}", exc_info=True)
 
 
 async def main() -> None:

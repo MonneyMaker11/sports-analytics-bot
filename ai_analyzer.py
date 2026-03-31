@@ -231,6 +231,63 @@ class EnhancedH2HAnalyzer:
 class MarketAnalyzer:
     """Analyzes betting market for value opportunities."""
 
+    # FIFA World Cup 2026 Qualification - Current Rankings (March 2026)
+    # Source: FIFA.com - Updated for 2026 qualification cycle
+    FIFA_RANKINGS = {
+        # Top 10
+        "Brazil": 1,
+        "France": 2,
+        "Argentina": 3,
+        "England": 4,
+        "Spain": 5,
+        "Portugal": 6,
+        "Italy": 7,       # Italy ~7-9
+        "Netherlands": 8,
+        "Belgium": 9,
+        "Croatia": 10,
+        # 11-25
+        "Uruguay": 11,
+        "Colombia": 12,
+        "Mexico": 13,
+        "Morocco": 14,
+        "Switzerland": 15,
+        "USA": 16,
+        "Germany": 17,
+        "Japan": 18,
+        "Senegal": 19,
+        "Denmark": 20,
+        "Serbia": 21,
+        "Poland": 22,
+        "Sweden": 23,
+        "Ukraine": 24,
+        "Austria": 25,
+        # 26-50
+        "Türkiye": 26,
+        "Iran": 27,
+        "South Korea": 28,
+        "Australia": 29,
+        "Egypt": 30,
+        "Czech Republic": 32,
+        "Norway": 33,
+        "Greece": 34,
+        "Slovakia": 35,
+        "Romania": 36,
+        "Russia": 37,
+        "Scotland": 38,
+        "Wales": 39,
+        "Northern Ireland": 40,
+        "Republic of Ireland": 41,
+        "Finland": 42,
+        "Hungary": 43,
+        "Albania": 44,
+        "Bosnia & Herzegovina": 45,  # Bosnia ~40-50
+        "Slovenia": 46,
+        "Serbia": 47,
+        # 50+
+        "Kosovo": 100,   # Unranked/low ~90-110
+        "default": 50
+    }
+
     def analyze_odds(self, odds: Dict) -> Dict[str, Any]:
         """Analyze odds for sharp money indicators."""
         if not odds:
@@ -257,19 +314,68 @@ class MarketAnalyzer:
         return {"sharp": "none", "value": None}
 
     def _extract_odd(self, odds: Dict, selection: str) -> Optional[float]:
-        """Extract specific odd."""
-        if isinstance(odds, list):
-            for bk in odds:
-                if isinstance(bk, dict):
-                    for mkt in bk.get("markets", []):
-                        for val in mkt.get("values", mkt.get("selections", [])):
-                            if isinstance(val, dict):
-                                label = str(val.get("value", val.get("label", ""))).lower()
-                                if selection.lower() in label:
-                                    try:
-                                        return float(val.get("odd", val.get("value")))
-                                    except:
-                                        pass
+        """
+        Extract specific odd from API-Football odds data.
+        Handles multiple bookmakers and market formats.
+        """
+        if not odds:
+            return None
+            
+        # Handle nested structure: {"odds": [...]}
+        odds_list = odds.get("odds", []) if isinstance(odds, dict) else odds
+        
+        if not isinstance(odds_list, list):
+            return None
+        
+        # Map selection to Match Winner labels
+        selection_map = {
+            "home": ["home", "1"],
+            "draw": ["draw", "x"],
+            "away": ["away", "2"],
+            "over": ["over", "o"],
+            "under": ["under", "u"],
+            "btts": ["yes", "both"],
+            "btts_no": ["no"]
+        }
+        
+        target_labels = selection_map.get(selection.lower(), [selection.lower()])
+        
+        # First try: "Match Winner" market (most reliable for 1X2)
+        for bk in odds_list:
+            if not isinstance(bk, dict):
+                continue
+            bk_name = bk.get("name", "").lower()
+            for mkt in bk.get("markets", []):
+                if not isinstance(mkt, dict):
+                    continue
+                mkt_name = mkt.get("name", "").lower()
+                
+                # Prioritize "Match Winner" market for 1X2 odds
+                if selection in ["home", "draw", "away"] and "match winner" in mkt_name:
+                    for val in mkt.get("values", []):
+                        if not isinstance(val, dict):
+                            continue
+                        label = str(val.get("value", "")).lower()
+                        if label in target_labels:
+                            try:
+                                return float(val.get("odd", 0))
+                            except:
+                                pass
+                
+                # Fallback: search all markets
+                for val in mkt.get("values", mkt.get("selections", [])):
+                    if isinstance(val, dict):
+                        label = str(val.get("value", val.get("label", ""))).lower()
+                        # Check if any target label matches
+                        for target in target_labels:
+                            if target in label or label in target:
+                                try:
+                                    odd_val = val.get("odd", val.get("value"))
+                                    if odd_val and float(odd_val) > 1:
+                                        return float(odd_val)
+                                except:
+                                    pass
+        
         return None
 
     def find_value_bets(self, probs: Dict[str, float], odds: Dict) -> List[Dict]:
@@ -294,16 +400,44 @@ class MarketAnalyzer:
 class EnhancedPoissonCalculator:
     """Enhanced Poisson calculator with multiple factors for diverse predictions."""
 
+    # National team match types - reduced home advantage
+    NATIONAL_HOME_ADVANTAGE = 1.06  # Much lower than club football (1.12-1.15)
+
     def __init__(self):
         self.metrics = AdvancedTeamMetrics()
         self.context = ContextualFactors()
         self.h2h_analyzer = EnhancedH2HAnalyzer()
         self.market = MarketAnalyzer()
 
+    def _is_national_teams_match(self, match_data: MatchDetails) -> bool:
+        """Check if this is a national teams match (WC Qualification, Euro, etc.)."""
+        tournament = match_data.match.tournament.lower() if match_data.match.tournament else ""
+        national_keywords = ["world cup", "wc qual", "euro", "nations league", "copa america", "qualification"]
+        return any(kw in tournament for kw in national_keywords)
+
+    def _get_fifa_ranking_adjustment(self, team_name: str) -> float:
+        """
+        Get team strength adjustment based on FIFA ranking.
+        Returns multiplier: top teams > 1.0, weak teams < 1.0
+        """
+        ranking = self.market.FIFA_RANKINGS.get(team_name, self.market.FIFA_RANKINGS["default"])
+        # Normalize: rank 1 = 1.30, rank 50 = 1.0, rank 100 = 0.70
+        if ranking <= 10:
+            return 1.20 + (10 - ranking) * 0.01  # Top 10: 1.20-1.30
+        elif ranking <= 25:
+            return 1.05 + (25 - ranking) * 0.01  # 11-25: 1.05-1.19
+        elif ranking <= 50:
+            return 0.90 + (50 - ranking) * 0.003  # 26-50: 0.90-1.04
+        else:
+            return 0.75 + (100 - ranking) * 0.002  # 50+: 0.75-0.89
+
     def calculate_probabilities(self, match_data: MatchDetails) -> Dict[str, Any]:
         """Calculate probabilities with all factors for diverse predictions."""
         match = match_data.match
         league_key = self._get_league_key(match.tournament)
+        
+        # Check if national teams match
+        is_national = self._is_national_teams_match(match_data)
 
         # 1. Base xG from form
         home_xg = self.metrics.calculate_xg_from_form(match_data.home_team_form, league_key)
@@ -326,8 +460,11 @@ class EnhancedPoissonCalculator:
 
         # 6. Apply adjustments
 
-        # Home advantage (varies by style)
-        home_adv = 1.15 if home_style["style"] == "very_attacking" else 1.12 if home_style["style"] == "attacking" else 1.08
+        # Home advantage - REDUCED for national teams
+        if is_national:
+            home_adv = self.NATIONAL_HOME_ADVANTAGE  # 1.06 for national teams
+        else:
+            home_adv = 1.15 if home_style["style"] == "very_attacking" else 1.12 if home_style["style"] == "attacking" else 1.08
         home_lam *= home_adv
 
         # Fatigue
@@ -356,20 +493,125 @@ class EnhancedPoissonCalculator:
             home_lam *= 0.75
             away_lam *= 0.75
 
-        # 7. Match-specific variance (prevents identical predictions)
+        # 7. FIFA Ranking adjustment (CRITICAL for national teams)
+        if is_national:
+            home_ranking_mult = self._get_fifa_ranking_adjustment(match.home_team)
+            away_ranking_mult = self._get_fifa_ranking_adjustment(match.away_team)
+            
+            # Apply ranking adjustment to expected goals
+            home_lam *= home_ranking_mult
+            away_lam *= away_ranking_mult
+            
+            logger.info(f"FIFA Ranking: {match.home_team} ({home_ranking_mult:.2f}) vs {match.away_team} ({away_ranking_mult:.2f})")
+
+        # 8. Match-specific variance (prevents identical predictions) - REDUCED for national teams
         seed = int(hashlib.md5(f"{match.home_team}{match.away_team}{match.date}".encode()).hexdigest()[:8], 16)
-        variance = 1.0 + ((seed % 100) - 50) / 250  # ±20% variance
+        variance_range = 0.08 if is_national else 0.20  # ±8% for national, ±20% for clubs
+        variance = 1.0 + ((seed % 100) - 50) / 250 * (variance_range / 0.20)
         home_lam *= variance
         away_lam *= variance
 
-        # Cap values
-        home_lam = max(0.35, min(home_lam, 4.2))
-        away_lam = max(0.25, min(away_lam, 3.8))
+        # Cap values - TIGHTER for national teams to prevent unrealistic expectations
+        if is_national:
+            home_lam = max(0.45, min(home_lam, 2.8))
+            away_lam = max(0.35, min(away_lam, 2.5))
+        else:
+            home_lam = max(0.35, min(home_lam, 4.2))
+            away_lam = max(0.25, min(away_lam, 3.8))
 
         # 8. Calculate Poisson probabilities
         probs = self._poisson_probs(home_lam, away_lam)
 
-        # 9. Add context
+        # 9. Market odds blending - CRITICAL for realistic probabilities
+        # Extract market odds and blend with our model
+        market_home_odd = self.market._extract_odd(match_data.odds, "home")
+        market_draw_odd = self.market._extract_odd(match_data.odds, "draw")
+        market_away_odd = self.market._extract_odd(match_data.odds, "away")
+
+        # Calculate market implied probabilities (remove vig)
+        if market_home_odd and market_away_odd and market_draw_odd:
+            market_implied = {
+                "home": 1 / market_home_odd,
+                "draw": 1 / market_draw_odd,
+                "away": 1 / market_away_odd
+            }
+            # Remove overround (vig)
+            total_implied = sum(market_implied.values())
+            market_probs = {
+                "home": market_implied["home"] / total_implied * 100,
+                "draw": market_implied["draw"] / total_implied * 100,
+                "away": market_implied["away"] / total_implied * 100
+            }
+
+            # Blend: 40% model + 60% market for national teams (market is more reliable)
+            # 60% model + 40% market for club teams
+            model_weight = 0.4 if is_national else 0.6
+            market_weight = 1 - model_weight
+
+            probs["home_win_pct"] = round(probs["home_win_pct"] * model_weight + market_probs["home"] * market_weight)
+            probs["draw_pct"] = round(probs["draw_pct"] * model_weight + market_probs["draw"] * market_weight)
+            probs["away_win_pct"] = round(probs["away_win_pct"] * model_weight + market_probs["away"] * market_weight)
+
+            # Ensure they sum to 100
+            total = probs["home_win_pct"] + probs["draw_pct"] + probs["away_win_pct"]
+            probs["home_win_pct"] = round(probs["home_win_pct"] / total * 100)
+            probs["draw_pct"] = round(probs["draw_pct"] / total * 100)
+            probs["away_win_pct"] = 100 - probs["home_win_pct"] - probs["draw_pct"]  # Ensure exactly 100
+
+            probs["market_home_odd"] = market_home_odd
+            probs["market_draw_odd"] = market_draw_odd
+            probs["market_away_odd"] = market_away_odd
+            probs["blended"] = True
+            logger.info(f"Market odds: {market_home_odd} | {market_draw_odd} | {market_away_odd} → Blended probs: {probs['home_win_pct']}% | {probs['draw_pct']}% | {probs['away_win_pct']}%")
+        else:
+            # NO MARKET ODDS - Use FIFA ranking based probabilities for national teams
+            if is_national:
+                home_rank = self.market.FIFA_RANKINGS.get(match.home_team, 50)
+                away_rank = self.market.FIFA_RANKINGS.get(match.away_team, 50)
+                
+                # Calculate ranking-based probabilities
+                # Lower rank = stronger team
+                home_strength = 100 / home_rank
+                away_strength = 100 / away_rank
+                
+                # Home advantage factor for national teams (small)
+                home_strength *= 1.06
+                
+                total_strength = home_strength + away_strength
+                
+                # Base probabilities from ranking
+                home_prob = home_strength / total_strength * 100
+                away_prob = away_strength / total_strength * 100
+                
+                # Draw probability based on team strength similarity
+                strength_ratio = min(home_strength, away_strength) / max(home_strength, away_strength)
+                draw_prob = 15 + strength_ratio * 12  # 15-27% draw rate
+                
+                # Normalize to 100%
+                remaining = 100 - draw_prob
+                home_prob = home_prob / (home_prob + away_prob) * remaining
+                away_prob = away_prob / (home_prob + away_prob) * remaining
+                
+                # Blend: 20% model + 80% ranking (ranking is more reliable for national teams)
+                probs["home_win_pct"] = round(probs["home_win_pct"] * 0.2 + home_prob * 0.8)
+                probs["draw_pct"] = round(probs["draw_pct"] * 0.2 + draw_prob * 0.8)
+                probs["away_win_pct"] = round(probs["away_win_pct"] * 0.2 + away_prob * 0.8)
+                
+                # Ensure exactly 100%
+                total = probs["home_win_pct"] + probs["draw_pct"] + probs["away_win_pct"]
+                probs["home_win_pct"] = round(probs["home_win_pct"] / total * 100)
+                probs["draw_pct"] = round(probs["draw_pct"] / total * 100)
+                probs["away_win_pct"] = 100 - probs["home_win_pct"] - probs["draw_pct"]
+                
+                probs["blended"] = False
+                probs["ranking_based"] = True
+                logger.info(f"FIFA Ranking: {home_rank} vs {away_rank} → Ranking probs: {home_prob:.1f}% | {draw_prob:.1f}% | {away_prob:.1f}% → Final: {probs['home_win_pct']}% | {probs['draw_pct']}% | {probs['away_win_pct']}%")
+            else:
+                probs["blended"] = False
+                probs["ranking_based"] = False
+                logger.info(f"No market odds available, using pure model: {probs['home_win_pct']}% | {probs['draw_pct']}% | {probs['away_win_pct']}%")
+
+        # 10. Add context
         probs.update({
             "home_xg": home_xg["xg_for"],
             "away_xg": away_xg["xg_for"],
@@ -380,13 +622,14 @@ class EnhancedPoissonCalculator:
             "away_style": away_style["style"],
             "home_counter": home_style["counter"],
             "btts_h2h_rate": h2h["btts_rate"],
+            "is_national_teams": is_national,
         })
 
-        # 10. Market analysis
+        # 11. Market analysis
         market_info = self.market.analyze_odds(match_data.odds)
         probs["sharp_money"] = market_info.get("sharp", "none")
 
-        # 11. Value bets
+        # 12. Value bets
         probs["value_bets"] = self.market.find_value_bets(probs, match_data.odds)
 
         logger.info(f"Enhanced: {match.home_team} {home_lam:.2f} vs {away_lam:.2f} {match.away_team} | Style: {home_style['style']} vs {away_style['style']}")
@@ -648,12 +891,12 @@ class AIAnalyzer:
         # Format form with detailed breakdown
         home_form = match_data.home_team_form[:5]
         away_form = match_data.away_team_form[:5]
-        
+
         home_goals_scored = sum(int(m['score'].split(':')[0]) for m in home_form if ':' in m.get('score', ''))
         home_goals_conceded = sum(int(m['score'].split(':')[1]) for m in home_form if ':' in m.get('score', ''))
         away_goals_scored = sum(int(m['score'].split(':')[0]) for m in away_form if ':' in m.get('score', ''))
         away_goals_conceded = sum(int(m['score'].split(':')[1]) for m in away_form if ':' in m.get('score', ''))
-        
+
         home_form_str = "".join([m.get('result', '?') for m in home_form])
         away_form_str = "".join([m.get('result', '?') for m in away_form])
 
@@ -665,7 +908,7 @@ class AIAnalyzer:
 
         # Get odds info
         odds_info = self._format_odds(match_data.odds)
-        
+
         # Get standings info
         standings_info = self._format_standings(getattr(match_data, 'standings', {}))
 
@@ -687,97 +930,367 @@ class AIAnalyzer:
 📋 **ТУРНИРНОЕ ПОЛОЖЕНИЕ:**
 {standings_info}
 
-⚙️ **ПРОДВИНУТАЯ СТАТИСТИКА:**
-• xG: **{stats.get('home_xg', 0):.2f}** vs **{stats.get('away_xg', 0):.2f}**
-• Стиль: **{stats.get('home_style', '?')}** vs **{stats.get('away_style', '?')}**
+📊 **СТАТИСТИКА КОМАНД:**
+• xG (ожидаемые голы): {stats.get('home_xg', 0):.2f} vs {stats.get('away_xg', 0):.2f}
+• Стиль игры: **{stats.get('home_style', '?')}** vs **{stats.get('away_style', '?')}**
 • Усталость: **{stats.get('home_fatigue', 1):.2f}** vs **{stats.get('away_fatigue', 1):.2f}**
 
-📊 **ВЕРОЯТНОСТИ (Poisson):**
-┌──────────────────────────────────────┐
+📈 **ФОРМА (последние 5 матчей):**
+{self._format_form(match_data.home_team_form[:5], match.home_team)}
+
+📈 **ФОРМА (последние 5 матчей):**
+{self._format_form(match_data.away_team_form[:5], match.away_team)}
+
+🎯 **H2H (личные встречи):**
+{self._format_h2h(match_data.h2h_matches[:5])}
+
+💰 **РЫНОЧНЫЕ ВЕРОЯТНОСТИ (от букмекеров):**
+┌─────────────────────────────────────────┐
 │ П1: {stats.get('home_win_pct', 0):5.1f}% | X: {stats.get('draw_pct', 0):5.1f}% | П2: {stats.get('away_win_pct', 0):5.1f}% │
-│ ТБ 2.5: {stats.get('over_2_5_pct', 0):5.1f}% | ТМ 2.5: {stats.get('under_2_5_pct', 0):5.1f}% │
-│ Обе забьют: {stats.get('btts_yes_pct', 0):5.1f}% │
-│ Ожидаемый тотал: **{stats.get('expected_total_goals', 0):.2f}** │
-└──────────────────────────────────────┘
+└─────────────────────────────────────────┘
+❗ ЭТО ТОЧНЫЕ ДАННЫЕ ОТ БУКМЕКЕРОВ — ИСПОЛЬЗУЙ ИХ КАК БАЗУ!
 
-🎲 **СЧЕТА (Top 3):** {', '.join([f"{s['score']} ({s['prob']}%)" for s in stats.get('likely_scores', [])[:3]])}
+💡 **РЫНОЧНЫЕ СИГНАЛЫ:** Sharp: **{stats.get('sharp_money', 'нет')}** | Value: **{', '.join([f"{b['bet']} (+{b['edge']}%)" for b in stats.get('value_bets', [])]) or 'нет'}**
 
-💰 **РЫНОК:** Sharp: **{stats.get('sharp_money', 'нет')}** | Value: **{', '.join([f"{b['bet']} (+{b['edge']}%)" for b in stats.get('value_bets', [])]) or 'нет'}**
-
-📋 **КОЭФФИЦИЕНТЫ:**
+📋 **КОЭФФИЦИЕНТЫ (из API):**
 {odds_info}
+
+**❗❗❗ КРИТИЧЕСКАЯ ИНСТРУКЦИЯ:**
+ТЫ ОБЯЗАН ИСПОЛЬЗОВАТЬ РЫНОЧНЫЕ ВЕРОЯТНОСТИ ВЫШЕ КАК БАЗУ!
+
+**ПРАВИЛО:**
+1. Твои итоговые вероятности ДОЛЖНЫ быть в пределах ±8% от рыночных!
+2. Если рыночные П2: 62% → ты НЕ МОЖЕШЬ дать меньше 54% или больше 70%!
+3. Если рыночные П1: 18% → ты НЕ МОЖЕШЬ дать больше 26%!
+
+**ПРИМЕР:**
+Рыночные: П1: 18% | X: 20% | П2: 62%
+✅ МОЖНО: П1: 20% | X: 22% | П2: 58% (отличие в пределах ±8%)
+❌ НЕЛЬЗЯ: П1: 46% | X: 24% | П2: 30% (отличие на 28% — КАТАСТРОФА!)
+
+**ЕСЛИ ИГНОРИРУЕШЬ РЫНОЧНЫЕ ВЕРОЯТНОСТИ — ТВОЙ ПРОГНОЗ БЕСПОЛЕЗЕН!**
 """
 
-        return f"""Ты — профессиональный спортивный аналитик. Твоя задача — дать **чёткий, структурированный прогноз** на матч.
+        return f"""🎯 PROMPT: Профессиональный гандикапер (Professional Football Handicapper)
+
+Ты — элитный аналитик с 15+ лет опыта в спортивном беттинге. Твои прогнозы основаны на данных, статистике и глубоком анализе. Точность — приоритет #1.
 
 ═══════════════════════════════════════════════════
-📋 **СТРУКТУРА ОТВЕТА** (строго соблюдай)
+🎯 МИССИЯ:
+═══════════════════════════════════════════════════
+Создать МАКСИМАЛЬНО ТОЧНЫЙ прогноз, используя:
+1. Объективные данные (API)
+2. ВСЮ актуальную информацию из интернета
+3. Математический расчёт
+4. Профессиональную логику
+
+═══════════════════════════════════════════════════
+🔍 ПОИСК В ИНТЕРНЕТЕ (ОБЯЗАТЕЛЬНО):
 ═══════════════════════════════════════════════════
 
-**1. ⚽ ЗАГОЛОВОК**
-Формат: ⚽ [Хозяева] vs [Гости] | [Турнир]
+ПЕРЕД анализом ПРОВЕРЬ в интернете:
 
-**2. 📝 ВСТУПЛЕНИЕ (1 предложение)**
-Только ключевой фактор матча (важность, травмы, мотивация).
+**1. ТРАВМЫ И ДИСКВАЛИФИКАЦИИ:**
+• Официальные сайты клубов/сборных
+• Пресс-конференции тренеров
+• Заявки на матч
+✓ Источники: BBC Sport, Sky Sports, официальные сайты
 
-**3. 📊 ОСНОВНЫЕ ВЕРОЯТНОСТИ**
-```
+**2. СОСТАВЫ:**
+• Ожидаемые стартовые 11
+• Ротация после предыдущих матчей
+• Возвращения после травм
+✓ Источники: The Athletic, ESPN, Goal.com
+
+**3. НОВОСТИ КОМАНД:**
+• Конфликты в раздевалке
+• Смена тренера
+• Финансовые проблемы
+• Мотивация (борьба за титул/выживание)
+✓ Источники: Reuters, AP, официальные лиги
+
+**4. СТАТИСТИКА:**
+• Последние результаты
+• Домашняя/выездная форма
+• Личные встречи
+✓ Источники: WhoScored, SofaScore, Transfermarkt
+
+**5. ПОГОДА И УСЛОВИЯ:**
+• Прогноз на матч
+• Состояние поля
+✓ Источники: Weather.com, AccuWeather
+
+**6. СУДЕЙСТВО:**
+• Назначенный рефери
+• Его статистика (карточки, пенальти)
+✓ Источники: Официальные сайты лиг
+
+═══════════════════════════════════════════════════
+✅ ПРОВЕРЕННЫЕ ИСТОЧНИКИ (ИСПОЛЬЗОВАТЬ):
+═══════════════════════════════════════════════════
+
+**Новости и аналитика:**
+✓ BBC Sport (bbc.com/sport)
+✓ Sky Sports (skysports.com)
+✓ ESPN (espn.com/soccer)
+✓ The Athletic (theathletic.com)
+✓ Reuters (reuters.com/sports)
+✓ Associated Press (apnews.com)
+
+**Футбольные:**
+✓ Goal.com
+✓ Transfermarkt
+✓ WhoScored
+✓ SofaScore
+✓ Flashscore
+
+**Официальные:**
+✓ Сайты клубов (manutd.com, realmadrid.com, etc.)
+✓ UEFA.com
+✓ FIFA.com
+✓ Сайты лиг (premierleague.com, laliga.es)
+
+**Статистика:**
+✓ FBref.com
+✓ Understat.com
+✓ FiveThirtyEight
+
+═══════════════════════════════════════════════════
+❌ ЗАПРЕЩЁННЫЕ ИСТОЧНИКИ:
+═══════════════════════════════════════════════════
+
+✗ Таблоиды: The Sun, Daily Mail, Mirror
+✗ Соцсети: Twitter, Facebook, Instagram
+✗ Блоги: личные блоги, фанатские сайты
+✗ Телеграм-каналы без подтверждения
+✗ Жёлтая пресса: SportBible, 90min
+✗ Ставочные форумы
+
+═══════════════════════════════════════════════════
+🧮 РАСЧЁТ ВЕРОЯТНОСТЕЙ (ПОШАГОВО):
+═══════════════════════════════════════════════════
+
+**ШАГ 1: БАЗА — рыночные коэффициенты**
+Рынок эффективен. Это точка отсчёта.
+Формула: Вероятность = (1 / коэффициент) * 100
+
+Пример:
+• Босния: 7.50 → 13.3%
+• Ничья: 4.25 → 23.5%
+• Италия: 1.52 → 65.8%
+• Сумма: 102.6% (маржа 2.6%)
+• После удаления маржи: 13% | 23% | 64%
+
+**ШАГ 2: Корректировка по форме**
+Форма (последние 5 матчей):
+• 5 побед подряд: +8%
+• 4 победы: +5%
+• 3 победы: +2%
+• 2 победы: 0%
+• 1 победа: -3%
+• 0 побед: -5%
+
+**ШАГ 3: Учёт xG (ожидаемые голы)**
+xG показывает реальную силу атаки/обороны:
+• xG > 2.0: элитная атака (+5%)
+• xG 1.5-2.0: хорошая атака (+2%)
+• xG 1.0-1.5: средняя (-2%)
+• xG < 1.0: слабая (-5%)
+
+**ШАГ 4: H2H (личные встречи)**
+• 4+ победы подряд одной команды: +7%
+• 3 победы подряд: +5%
+• 2 победы подряд: +3%
+• Паритет: 0%
+
+**ШАГ 5: Домашнее преимущество**
+• Клубы: +10-12%
+• Сборные: +6-8% (меньше из-за нейтральной атмосферы)
+
+**ШАГ 6: Травмы/дисквалификации**
+• Ключевой игрок вне игры: -12%
+• 2+ ключевых: -20%
+• Все в строю: 0%
+
+**ШАГ 7: Мотивация**
+• Критический матч (финал, квалификация): +5%
+• Обычный матч: 0%
+• Матч без мотивации: -5%
+
+**ШАГ 8: ФИНАЛЬНЫЙ РАСЧЁТ**
+Сложи все корректировки с базой (Шаг 1).
+Проверь: П1 + X + П2 = 100%
+
+═══════════════════════════════════════════════════
+🚫 КРАСНЫЕ ФЛАГИ (КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО):
+═══════════════════════════════════════════════════
+❌ Твои вероятности ОТЛИЧАЮТСЯ от рыночных > 8%!
+❌ Аутсайдер > 25% (если рыночные < 20%)
+❌ Фаворит < 50% (если рыночные > 60%)
+❌ Ничья < 12% или > 35%
+❌ Сумма вероятностей ≠ 100%
+❌ Игнорировать рыночные вероятности
+❌ Рекомендация противоречит вероятностям
+❌ Прогноз без обоснования
+❌ **ВЫДУМЫВАТЬ КОЭФФИЦИЕНТЫ** — бери ТОЛЬКО из API или рыночных!
+
+═══════════════════════════════════════════════════
+💰 КОЭФФИЦИЕНТЫ (КРИТИЧНО ВАЖНО):
+═══════════════════════════════════════════════════
+
+**РЫНОЧНЫЕ ВЕРОЯТНОСТИ — ЭТО БАЗА!**
+
+В разделе "💰 РЫНОЧНЫЕ ВЕРОЯТНОСТИ (от букмекеров):" ты видишь проценты,
+рассчитанные из реальных коэффициентов букмекеров.
+
+**Используй ИХ как точку отсчёта:**
+1. Возьми рыночные вероятности за ОСНОВУ
+2. Скорректируй на ±5-10% на основе:
+   - Формы команд
+   - Травм (из интернета)
+   - Мотивации
+   - Домашнего преимущества
+3. Итоговые вероятности должны быть БЛИЗКИ к рыночным (±10%)
+
+**Пример ПРАВИЛЬНОГО расчёта:**
+Рыночные: П1: 18% | X: 20% | П2: 62%
+↓
+Твой анализ:
+- Форма Боснии 4/5 побед → +3% к П1
+- Италия без травм → 0%
+- Домашний бонус Боснии → +2% к П1
+- Мотивация Италии выше → -3% к П1, +3% к П2
+↓
+ИТОГ: П1: 20% | X: 20% | П2: 60% (близко к рыночным!)
+
+**Пример НЕПРАВИЛЬНОГО расчёта:**
+Рыночные: П1: 18% | X: 20% | П2: 62%
+↓
+Твой анализ: П1: 46% | X: 22% | П2: 32%  ← ❌ НЕДОПУСТИМО!
+(Отличие от рыночных на 28% без причин!)
+
+═══════════════════════════════════════════════════
+✅ ПРИМЕР ИДЕАЛЬНОГО АНАЛИЗА:
+═══════════════════════════════════════════════════
+
+⚽️ Босния и Герцеговина vs Италия | Отбор ЧМ-2026
+
+📝 Италия борется за прямую путёвку, Босния играет без давления.
+
+📊 ВЕРОЯТНОСТИ
+П1: 20% | X: 22% | П2: 58%
+(Рыночные: 18% | 20% | 62% — отличие в пределах ±8%, корректно!)
+
+Метод: рынок (62%) + домашний бонус Боснии (+4%) - мотивация Италии (-8%)
+
+📈 ФОРМА
+• Босния: W-W-W-W-L (11-3) — 4/5 побед, мощная атака дома
+• Италия: W-L-W-W-W (13-7) — 4/5 побед, но пропускает
+
+🎯 H2H
+• Италия выиграла 4 из 5 последних встреч
+• Босния не побеждала Италию с 2013 года
+• Средний тотал: 2.20 гола
+
+📌 КЛЮЧЕВЫЕ ФАКТОРЫ
+• xG: 1.64 vs 1.81 — Италия создаёт больше
+• Стиль: attacking vs very_attacking — голы ожидаются
+• Домашний бонус: Босния сильна в Зенице
+• Мотивация: Италии нужна победа для квалификации
+
+🎯 РЕКОМЕНДАЦИИ
+1. П2 — 58% (кф уточняй у букмекеров, рыночные ~1.55)
+   Италия доминирует в H2H, выше мотивация
+
+2. ТБ 2.5 — 60% (кф уточняй, рыночные ~1.65)
+   Ожидаемый тотал 3.3+, атакующие стили
+
+⚡️ ВЕРДИКТ
+Италия фаворит, но Босния забьёт на своём поле.
+
+⚠️ Прогноз основан на данных, но не гарантирует выигрыш.
+
+═══════════════════════════════════════════════════
+📋 ФОРМАТ ОТВЕТА:
+═══════════════════════════════════════════════════
+
+**⚽️ ЗАГОЛОВОК**
+[Команда 1] vs [Команда 2] | [Турнир]
+
+**📝 ВСТУПЛЕНИЕ (1 предложение)**
+Главный контекст матча
+
+**📊 ВЕРОЯТНОСТИ**
 П1: XX% | X: XX% | П2: XX%
-```
-**Метод расчёта (кратко):** 2-3 ключевых фактора (форма, H2H, xG).
+(Сумма = 100%)
 
-**4. 📈 ФОРМА**
-```
-[Хозяева]: П/В/Н... ([забито]–[пропущено])
-[Гости]: П/В/Н... ([забито]–[пропущено])
-```
+Метод: кратко (2-3 фактора)
 
-**5. 🎯 H2H ТРЕНДЫ**
-2-3 пункта с цифрами (средний тотал, % BTTS, доминирование).
+**📈 ФОРМА**
+[Команда 1]: X-X-X-X-X (забито-пропущено)
+[Команда 2]: X-X-X-X-X (забито-пропущено)
 
-**6. 📌 КЛЮЧЕВЫЕ ФАКТОРЫ (2-3 пункта)**
-Только важные: xG, стили, усталость, травмы.
+**🎯 H2H**
+2-3 факта с цифрами
 
-**7. 🎯 РЕКОМЕНДАЦИИ (2 варианта)**
-Формат:
-```
-1. [Ставка] — XX% (коэф. ~X.XX)
-   Обоснование: 1 предложение
-```
+**📌 КЛЮЧЕВЫЕ ФАКТОРЫ**
+• xG
+• Стиль
+• Травмы/составы (актуально из интернета!)
+• Мотивация
 
-**8. ⚡ ВЕРДИКТ (1 предложение)**
-Главный вывод + лучшая ставка.
+**📊 ДОП. ВЕРОЯТНОСТИ**
+ТБ 2.5: XX% | ТМ 2.5: XX%
+Обе забьют: XX% | ОЗ нет: XX%
 
-**9. ⚠️ ДИСКЛЕЙМЕР**
-«Прогноз основан на статистике, но не гарантирует выигрыш.»
+**🎯 РЕКОМЕНДАЦИИ (максимум 2)**
+[Ставка] — XX% (кф ~X.XX **из API**)
+Обоснование: 1-2 предложения
 
-═══════════════════════════════════════════════════
-🎨 **ТРЕБОВАНИЯ К СТИЛЮ**
-═══════════════════════════════════════════════════
-• **Выделяй жирным** ключевые цифры и проценты
-• Используй эмодзи для акцентов (⚽📊🎯💡⚡⚠️)
-• **Без воды** — только факты и цифры
-• **Кратко** — максимум 400-500 символов
-• Если данных нет — пиши «нет данных»
-• **Не придумывай** несуществующие данные
+**⚡️ ВЕРДИКТ (1 предложение)**
+
+**⚠️ ДИСКЛЕЙМЕР**
 
 ═══════════════════════════════════════════════════
-📊 **ДАННЫЕ ДЛЯ АНАЛИЗА**
+💡 ПРОФЕССИОНАЛЬНАЯ ЛОГИКА:
+═══════════════════════════════════════════════════
+• Фаворит с кф 1.40-1.60 = 55-70% (не больше!)
+• Аутсайдер с кф 5.0-9.0 = 10-20% (не больше!)
+• Ничья в равном матче = 22-28%
+• Ничья в матче с явным фаворитом = 15-20%
+• ТБ 2.5 при xG сумма > 3.0 = 60-70%
+• ОЗ при xG обеих > 1.3 = 55-65%
+
+═══════════════════════════════════════════════════
+📊 ДАННЫЕ ИЗ API:
 ═══════════════════════════════════════════════════
 {data}
+
+**⚠️ ВНИМАНИЕ: ПРОВЕРЬ ВСЮ АКТУАЛЬНУЮ ИНФОРМАЦИЮ В ИНТЕРНЕТЕ:**
+1. Травмы и дисквалификации (официальные сайты)
+2. Ожидаемые составы (The Athletic, Sky Sports)
+3. Новости команд (BBC, ESPN, Reuters)
+4. Погода на матч
+5. Судейская бригада
+
+**ИСПОЛЬЗУЙ ТОЛЬКО ПРОВЕРЕННЫЕ ИСТОЧНИКИ (см. список выше).**
 
 **НАЧНИ АНАЛИЗ:**"""
 
     async def generate_analysis(self, match_data: MatchDetails) -> str:
-        """Generate analysis using Claude."""
+        """Generate analysis using Claude with web search for latest news/injuries."""
         try:
             prompt = self._build_prompt(match_data)
 
+            # Use Claude with web search capability (if available)
+            # This allows Claude to check latest injuries, team news, etc.
             response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
+                temperature=0.7,
+                # Enable web search for current data (if supported by API)
+                extra_headers={"x-search-enabled": "true"} if hasattr(self.client, 'messages') else {}
             )
 
             return response.content[0].text

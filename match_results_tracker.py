@@ -122,18 +122,27 @@ class MatchResultsTracker:
         """Remove old tracked matches."""
         cutoff = datetime.now() - timedelta(days=days)
         to_remove = []
-        
+
         for match_id, match in self.tracked_matches.items():
             try:
-                match_date = datetime.fromisoformat(match.match_date.replace('Z', '+00:00'))
+                # Handle both Unix timestamp and ISO date formats
+                if match.match_date.isdigit():
+                    # Unix timestamp (e.g., "1774982700")
+                    match_date = datetime.fromtimestamp(int(match.match_date))
+                else:
+                    # ISO date format (e.g., "2026-03-31T18:45:00+00:00")
+                    match_date = datetime.fromisoformat(match.match_date.replace('Z', '+00:00'))
+                
+                # Remove if old OR if report was already sent
                 if match_date < cutoff or match.report_sent:
                     to_remove.append(match_id)
-            except:
-                to_remove.append(match_id)
-        
+            except Exception as e:
+                logger.warning(f"Failed to parse match date for {match_id}: {e}")
+                # Don't remove on parse error - keep the match tracked
+
         for match_id in to_remove:
             del self.tracked_matches[match_id]
-        
+
         if to_remove:
             self.save_matches()
             logger.info(f"Cleaned up {len(to_remove)} old tracked matches")
@@ -244,43 +253,59 @@ class PostMatchReporter:
         
         # Summary
         report.append("📈 **ИТОГ:**")
-        
-        # Calculate accuracy
+
+        # Calculate accuracy - check if predicted outcome matches actual
         accuracy_checks = []
-        
-        # 1X2
-        if actual_outcome == "П1" and pred_home >= 40:
+        correct_predictions = 0
+        total_predictions = 0
+
+        # 1X2 - check if the predicted favorite/outcome matches
+        max_pred = max(pred_home, pred_draw, pred_away)
+        predicted_outcome = "П1" if pred_home == max_pred else "X" if pred_draw == max_pred else "П2"
+        total_predictions += 1
+        if predicted_outcome == actual_outcome:
             accuracy_checks.append(True)
-        elif actual_outcome == "X" and pred_draw >= 25:
-            accuracy_checks.append(True)
-        elif actual_outcome == "П2" and pred_away >= 40:
-            accuracy_checks.append(True)
+            correct_predictions += 1
         else:
             accuracy_checks.append(False)
-        
-        # Total
-        if (total_goals > 2.5 and over_2_5 >= 50) or (total_goals <= 2.5 and under_2_5 >= 50):
+
+        # Total Goals - check if over/under prediction matches
+        total_predictions += 1
+        predicted_over = over_2_5 >= under_2_5
+        actual_over = total_goals > 2.5
+        if predicted_over == actual_over:
             accuracy_checks.append(True)
+            correct_predictions += 1
         else:
             accuracy_checks.append(False)
-        
-        # BTTS
-        if (btts == "Да" and btts_yes >= 50) or (btts == "Нет" and btts_no >= 50):
+
+        # BTTS - check if yes/no prediction matches
+        total_predictions += 1
+        predicted_btts = btts_yes >= btts_no
+        actual_btts = btts == "Да"
+        if predicted_btts == actual_btts:
             accuracy_checks.append(True)
+            correct_predictions += 1
         else:
             accuracy_checks.append(False)
         
         correct = sum(accuracy_checks)
         total = len(accuracy_checks)
         accuracy = round(correct / total * 100) if total > 0 else 0
+
+        # Detailed breakdown
+        report.append(f"✅ 1X2: {'Верно' if accuracy_checks[0] else 'Неверно'}")
+        report.append(f"✅ Тотал: {'Верно' if accuracy_checks[1] else 'Неверно'}")
+        report.append(f"✅ ОЗ: {'Верно' if accuracy_checks[2] else 'Неверно'}")
+        report.append("")
         
         if accuracy >= 67:
-            report.append(f"✅ Отличный прогноз! Точность: {accuracy}%")
+            report.append(f"✅ Отличный прогноз! Точность: {accuracy}% ({correct}/{total})")
         elif accuracy >= 50:
-            report.append(f"⚠️ Неплохо! Точность: {accuracy}%")
+            report.append(f"⚠️ Неплохо! Точность: {accuracy}% ({correct}/{total})")
         else:
-            report.append(f"❌ Неудачный прогноз. Точность: {accuracy}%")
-        
+            report.append(f"❌ Неудачный прогноз. Точность: {accuracy}% ({correct}/{total})")
+
         report.append("\n⚠️ _Ставки — это риск. Прошлые результаты не гарантируют будущие._")
         
         return "\n".join(report)

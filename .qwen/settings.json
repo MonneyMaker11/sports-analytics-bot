@@ -22,7 +22,13 @@
       "Bash(nohup *)",
       "Bash(then)",
       "Bash(else)",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(git tag *)",
+      "Bash(timeout *)",
+      "Bash(rm *)",
+      "Bash(tail *)",
+      "Bash(curl *)",
+      "Bash(tee *)"
     ]
   },
   "$version": 3
