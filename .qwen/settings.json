@@ -6,7 +6,23 @@
       "Bash(python *)",
       "Bash(date *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(chmod *)",
+      "Bash(pkill *)",
+      "Bash(./start_bot.sh)",
+      "Bash(sleep *)",
+      "Bash(cd *)",
+      "Bash(head *)",
+      "Bash(ps *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(cp *)",
+      "Bash(true)",
+      "Bash(nohup *)",
+      "Bash(then)",
+      "Bash(else)",
+      "Bash(fi)"
     ]
   },
   "$version": 3

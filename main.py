@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 
 from api_football_parser import APIFootballParser, Match, MatchDetails
 from ai_analyzer import AIAnalyzer, PoissonCalculator
+from match_results_tracker import MatchResultsTracker, PostMatchReporter
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,20 @@ class FootballBot:
         """
         api_football_key = os.getenv("API_FOOTBALL_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-        
+
         if not api_football_key:
             logger.error("API_FOOTBALL_KEY not found in environment variables")
-        
+
         self.parser = APIFootballParser(api_key=api_football_key or "")
         self.analyzer = AIAnalyzer() if anthropic_key else None
         self.default_league = default_league
 
         self.application = Application.builder().token(token).build()
+        
+        # Initialize match results tracker
+        self.tracker = MatchResultsTracker()
+        self.reporter = PostMatchReporter(self.tracker, self.parser)
+        
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:
@@ -413,17 +419,38 @@ class FootballBot:
             # Generate Poisson-based analysis
             calc = PoissonCalculator()
             stats = calc.calculate_probabilities(match_details)
-            
+
             match = match_details.match
             header = f"⚽ {match.home_team} vs {match.away_team}\n"
             header += f"🏆 {match.tournament}\n\n"
-            
+
+            # Track match for post-match report
+            self.tracker.track_match(
+                match_id=match_id,
+                user_id=query.from_user.id,
+                home_team=match.home_team,
+                away_team=match.away_team,
+                tournament=match.tournament,
+                match_date=match.date if isinstance(match.date, str) else str(match.date),
+                predictions={
+                    'home_win_pct': stats['home_win_pct'],
+                    'draw_pct': stats['draw_pct'],
+                    'away_win_pct': stats['away_win_pct'],
+                    'over_2_5_pct': stats['over_2_5_pct'],
+                    'under_2_5_pct': stats['under_2_5_pct'],
+                    'btts_yes_pct': stats['btts_yes_pct'],
+                    'btts_no_pct': stats['btts_no_pct'],
+                    'likely_scores': stats.get('likely_scores', [])
+                }
+            )
+            logger.info(f"Tracked match {match_id} for post-match report")
+
             # Check if Anthropic is available
             anthropic_available = (
-                os.getenv("ANTHROPIC_API_KEY") and 
+                os.getenv("ANTHROPIC_API_KEY") and
                 os.getenv("ANTHROPIC_API_KEY") != "your_anthropic_api_key_here"
             ) and self.analyzer is not None
-            
+
             if not anthropic_available:
                 # Free analysis with full team form from API-Football
                 stats_text = self._format_stats_analysis(stats, match_details)
@@ -484,6 +511,9 @@ class FootballBot:
         await self.application.updater.start_polling()
         logger.info("Bot is running")
 
+        # Schedule periodic match results check (every 30 minutes)
+        asyncio.create_task(self._periodic_results_check())
+
         try:
             while True:
                 await asyncio.sleep(1)
@@ -492,6 +522,54 @@ class FootballBot:
             await self.application.updater.stop()
             await self.application.stop()
             await self.application.shutdown()
+
+    async def _periodic_results_check(self) -> None:
+        """Periodically check for finished matches and send reports."""
+        logger.info("Started periodic results check task")
+        
+        while True:
+            try:
+                await asyncio.sleep(1800)  # Check every 30 minutes
+                
+                logger.info("Checking for finished matches...")
+                
+                # Get tracked match IDs
+                tracked_match_ids = list(self.tracker.tracked_matches.keys())
+                if not tracked_match_ids:
+                    continue
+                
+                # Check each tracked match
+                finished_matches = []
+                for match_id in tracked_match_ids:
+                    tracked = self.tracker.get_tracked_match(match_id)
+                    if not tracked or tracked.report_sent:
+                        continue
+                    
+                    # Get current match status from API
+                    params = {"id": match_id}
+                    data = self.parser._make_request("/fixtures", params)
+                    
+                    if data and data.get("response"):
+                        fixture = data["response"][0]
+                        status = fixture.get("fixture", {}).get("status", {}).get("short", "")
+                        
+                        # If match is finished
+                        if status in ['FT', 'AET', 'PEN']:
+                            finished_matches.append(fixture)
+                
+                # Send reports for finished matches
+                if finished_matches:
+                    reports_sent = await self.reporter.check_and_send_reports(
+                        self.application,
+                        finished_matches
+                    )
+                    logger.info(f"Sent {reports_sent} post-match reports")
+                
+                # Cleanup old matches
+                self.tracker.cleanup_old_matches(days=7)
+                
+            except Exception as e:
+                logger.error(f"Error in periodic results check: {e}", exc_info=True)
 
 
 async def main() -> None:
