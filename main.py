@@ -529,7 +529,7 @@ class FootballBot:
         
         while True:
             try:
-                await asyncio.sleep(1800)  # Check every 30 minutes
+                await asyncio.sleep(300)  # Check every 5 minutes (was 30)
                 
                 logger.info("Checking for finished matches...")
                 
